@@ -6,7 +6,6 @@ import sys
 from urllib.parse import urlparse
 
 import attr
-import pkg_resources
 import structlog
 
 from PyQt6.QtCore import QUrl, QTimer, pyqtSlot, Qt
@@ -19,7 +18,6 @@ from openconnect_sso import config
 
 
 app = None
-profile = None
 logger = structlog.get_logger("webengine")
 
 
@@ -69,7 +67,6 @@ class Process(multiprocessing.Process):
     def run(self):
         # To work around funky GC conflicts with C++ code by ensuring QApplication terminates last
         global app
-        global profile
 
         signal.signal(signal.SIGTERM, on_sigterm)
         signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -80,7 +77,6 @@ class Process(multiprocessing.Process):
         if self.display_mode == config.DisplayMode.HIDDEN:
             argv += ["-platform", "minimal"]
         app = QApplication(argv)
-        profile = QWebEngineProfile("openconnect-sso")
 
         if self.proxy:
             parsed = urlparse(self.proxy)
@@ -102,7 +98,7 @@ class Process(multiprocessing.Process):
             pass
 
         force_python_execution.timeout.connect(ignore)
-        web = WebBrowser(cfg.auto_fill_rules, self._states.put, profile)
+        web = WebBrowser(cfg.auto_fill_rules, self._states.put)
 
         startup_info = self._commands.get()
         logger.info("Browser started", startup_info=startup_info)
@@ -124,7 +120,6 @@ class Process(multiprocessing.Process):
 
 
 def on_sigterm(signum, frame):
-    global profile
     logger.info("Terminate requested.")
     # Force flush cookieStore to disk. Without this hack the cookieStore may
     # not be synced at all if the browser lives only for a short amount of
@@ -133,7 +128,7 @@ def on_sigterm(signum, frame):
 
     # See: https://github.com/qutebrowser/qutebrowser/commit/8d55d093f29008b268569cdec28b700a8c42d761
     cookie = QNetworkCookie()
-    profile.cookieStore().deleteCookie(cookie)
+    QWebEngineProfile.defaultProfile().cookieStore().deleteCookie(cookie)
 
     # Give some time to actually save cookies
     exit_timer = QTimer(app)
@@ -142,12 +137,10 @@ def on_sigterm(signum, frame):
 
 
 class WebBrowser(QWebEngineView):
-    def __init__(self, auto_fill_rules, on_update, profile):
+    def __init__(self, auto_fill_rules, on_update):
         super().__init__()
         self._on_update = on_update
         self._auto_fill_rules = auto_fill_rules
-        page = QWebEnginePage(profile, self)
-        self.setPage(page)
         cookie_store = self.page().profile().cookieStore()
         cookie_store.cookieAdded.connect(self._on_cookie_added)
         self.page().loadFinished.connect(self._on_load_finished)
@@ -158,7 +151,22 @@ class WebBrowser(QWebEngineView):
             return self._popupWindow.view()
 
     def authenticate_at(self, url, credentials):
-        script_source = pkg_resources.resource_string(__name__, "user.js").decode()
+        # Load the user.js script using importlib.resources
+        try:
+            # Python 3.9+
+            import importlib.resources as pkg_resources_compat
+            script_source = pkg_resources_compat.files('openconnect_sso.browser').joinpath('user.js').read_text()
+        except (ImportError, AttributeError):
+            # Fallback for older Python or if the new API doesn't work
+            from pathlib import Path
+            import os
+            script_path = Path(__file__).parent / 'user.js'
+            if script_path.exists():
+                script_source = script_path.read_text()
+            else:
+                logger.error("Could not find user.js script")
+                script_source = ""
+
         script = QWebEngineScript()
         script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
         script.setWorldId(QWebEngineScript.ScriptWorldId.ApplicationWorld)

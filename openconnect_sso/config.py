@@ -126,7 +126,13 @@ class Credentials(ConfigNode):
     def totp(self):
         try:
             totpsecret = keyring.get_password(APP_NAME, "totp/" + self.username)
-            return pyotp.TOTP(totpsecret).now() if totpsecret else None
+            if totpsecret:
+                try:
+                    return pyotp.TOTP(totpsecret).now()
+                except Exception as e:
+                    logger.warning(f"Invalid TOTP secret in keyring: {e}. Please reconfigure.")
+                    return None
+            return None
         except keyring.errors.KeyringError:
             logger.info("Cannot retrieve saved totp info from keyring.")
             return ""
