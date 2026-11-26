@@ -10,9 +10,22 @@ import structlog
 
 from PyQt6.QtCore import QUrl, QTimer, pyqtSlot, Qt
 from PyQt6.QtNetwork import QNetworkCookie, QNetworkProxy
-from PyQt6.QtWebEngineCore import QWebEngineScript, QWebEngineProfile, QWebEnginePage
+from PyQt6.QtWebEngineCore import (
+    QWebEngineScript,
+    QWebEngineProfile,
+    QWebEnginePage,
+    QWebEngineWebAuthUxRequest,
+)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWidgets import QApplication, QWidget, QSizePolicy, QVBoxLayout
+from PyQt6.QtWidgets import (
+    QApplication,
+    QInputDialog,
+    QLineEdit,
+    QMessageBox,
+    QWidget,
+    QSizePolicy,
+    QVBoxLayout,
+)
 
 from openconnect_sso import config
 
@@ -144,6 +157,52 @@ class WebBrowser(QWebEngineView):
         cookie_store = self.page().profile().cookieStore()
         cookie_store.cookieAdded.connect(self._on_cookie_added)
         self.page().loadFinished.connect(self._on_load_finished)
+        self._webauth_request = None
+        self.page().webAuthUxRequested.connect(self._on_webauth_requested)
+
+    def _on_webauth_requested(self, request):
+        # QtWebEngine delegates FIDO2/passkey PIN and account prompts to the app
+        self._webauth_request = request
+        request.stateChanged.connect(self._on_webauth_state_changed)
+        self._on_webauth_state_changed(request.state())
+
+    def _on_webauth_state_changed(self, state):
+        request = self._webauth_request
+        States = QWebEngineWebAuthUxRequest.WebAuthUxState
+        if request is None:
+            return
+        if state == States.CollectPin:
+            pin_request = request.pinRequest()
+            Errors = QWebEngineWebAuthUxRequest.PinEntryError
+            label = f"Enter the PIN for your security key ({request.relyingPartyId()})"
+            if pin_request.error == Errors.WrongPin:
+                label = f"Wrong PIN, {pin_request.remainingAttempts} attempts left.\n" + label
+            elif pin_request.error == Errors.TooShort:
+                label = f"PIN too short (minimum {pin_request.minPinLength}).\n" + label
+            pin, ok = QInputDialog.getText(
+                self, "Security key PIN", label, QLineEdit.EchoMode.Password
+            )
+            if ok and pin:
+                request.setPin(pin)
+            else:
+                request.cancel()
+        elif state == States.SelectAccount:
+            names = request.userNames()
+            name, ok = QInputDialog.getItem(
+                self, "Select account", "Select a passkey account", names, 0, False
+            )
+            if ok and name:
+                request.setSelectedAccount(name)
+            else:
+                request.cancel()
+        elif state == States.FinishTokenCollection:
+            logger.info("Touch your security key")
+        elif state == States.RequestFailed:
+            reason = request.requestFailureReason()
+            QMessageBox.warning(self, "Security key", f"Authentication failed: {reason.name}")
+            request.cancel()
+        elif state in (States.Cancelled, States.Completed):
+            self._webauth_request = None
 
     def createWindow(self, type):
         if type == QWebEnginePage.WebDialog:
